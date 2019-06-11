@@ -1,0 +1,65 @@
+// This example demonstrates the use of the pixel QA band to mask
+// clouds in surface reflectance (SR) data.  It is suitable
+// for use with any of the Landsat SR datasets.
+var bts_sampel = ee.Geometry.Rectangle([113.2625,-8.78036, 114.605,-7.604314]);
+
+var batch = require('users/fitoprincipe/geetools:batch');
+
+// Function to cloud mask from the pixel_qa band of Landsat 8 SR data.
+function maskL8sr(image) {
+  // Bits 3 and 5 are cloud shadow and cloud, respectively.
+  var cloudShadowBitMask = 1 << 3;
+  var cloudsBitMask = 1 << 5;
+
+  // Get the pixel QA band.
+  var qa = image.select('pixel_qa');
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0)
+      .and(qa.bitwiseAnd(cloudsBitMask).eq(0));
+
+  // Return the masked image, scaled to TOA reflectance, without the QA bands.
+  return image.updateMask(mask).divide(10000) // Reflektan dijadikan 0-1
+      .select("B[0-9]*")
+      .copyProperties(image, ["system:time_start"]);
+}
+
+function addBands(image){
+  var doy = image.date().getRelative('day', 'year');
+  var doyBand = ee.Image.constant(doy).uint16().rename('doy')
+  var ndvi = image.normalizedDifference(['B5', 'B4']).rename('NDVI');
+  var ndbi = image.normalizedDifference(['B3', 'B6']).rename('NDBI');
+  var ndwi = image.normalizedDifference(['B6', 'B5']).rename('NDWI');
+  var evi = image.expression(
+    "((b('B4') < b('B5')) || (b('B2') < b('B4'))) ? 2.5 * ((NIR - RED) / (1+NIR + 6 * RED - 7.5 * BLUE )) : 1.5*(NIR-RED)/(0.5+NIR+RED)"
+    ,{
+    'NIR': image.select('B5'),
+    'RED': image.select('B4'),
+    'BLUE': image.select('B2')
+    }
+    ).rename('EVI');
+
+  return image.addBands(doyBand.int16()).addBands(ndvi.int16()).addBands(ndbi.int16()).addBands(ndwi.int16()).addBands(evi.int16());
+}
+
+
+// Map the function over one year of data.
+var LS8_SR = ee.ImageCollection('LANDSAT/LC08/C01/T1_SR') 
+// Koleksi data LS8 yg sdh terkoreksi atmosferik dr TOA mnjdi Surface Ref (SR)
+    .filterDate('2017-09-01', '2019-01-31')
+    .map(maskL8sr) // Masking awan & bayangan agr diabaikan dlm perhitungan/proses
+    .map(addBands)
+   .filterBounds(bts_sampel);
+    
+var count = LS8_SR.size()
+print("Collection", count)
+
+// Export the image, specifying scale and region. 
+
+batch.Download.ImageCollection.toDrive(LS8_SR
+  .select(['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7','EVI','NDVI','NDBI','NDWI'])
+  , 'LandsatBand', {
+  scale: 27.76147, // Resolusi disamakan dg Produk Pustekdata 0.00025 deg
+  maxPixels: 9e9,
+  region: bts_sampel.getInfo() // or geometry.getInfo()
+})
